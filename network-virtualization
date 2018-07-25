@@ -1,0 +1,539 @@
+﻿51-1
+回顾：
+		CPU半虚拟化: Xen   
+		I/O半虚拟化: 
+			   Xen: net, blk
+			   KVM：virtio
+                Memory半虚拟化: 
+			shadow page table（影子页表）
+			EPT
+		完全虚拟化：HVM
+	        网络虚拟化：桥接，路由，NAT，隔离（在vmware中，隔离技术除了0,1，8之外的虚拟交换机）
+	        虚拟化管理工具：http://www.linux-kvm.org/page/Management_Tools
+网络虚拟化技术
+                OpenVSwitch: 虚拟交换机，且创建的虚拟交换机支持VLAN（最多支持4096个VLAN id）, VXLAN（可以简单理解为扩展的VLAN，即可以有更多的VLAN id）
+		Virtual LAN（虚拟局域网）：LAN即为广播帧能够到的节点范围，也即能够直接通信的范围；
+		VLAN的划分:
+			基于MAC地址
+			基于交换机Port实现
+			基于IP地址实现
+			基于用户实现
+		当一个交换机有不同VLAN时，则交换机接口的类型分为：
+			访问链接：access link
+			汇聚链接：trunc link
+		VLAN的汇聚协议：
+			IEEE 802.1q（IEEE指的是电气和电子工程师协会，即institude eltrical and eltronics engineers）
+                        modinfo 8021q
+			ISL: Inter Switch Link（思科公司的私有协议）
+		VLAN间通信，必须要加路由器，此时路由器分为：
+				                  访问链接：router为每个VLAN提供一个接口
+				                  汇聚链接：router只向交换机提供一个接口。汇聚链接实际就是个三层交换机，三层交换机同时有3层和2层功能
+补充说明：
+      1）使用brctl创建出来的虚拟交换机不支持VLAN
+      2）考虑一种应用场景：比如亚马逊公司有很多台物理服务器组成一个云环境，每一个公司就对应一个VLAN id，每一个公司内部由划分很多部门，各部门之间用虚拟路由器来实现隔离
+      3) 路由器是天然的广播报文屏障
+      4) VLAN的思想是，假设一个物理交换机有4个接口，我们按照port划分，把port1和2划分为VLAN1；把port3和4划分为VLAN2
+      5）考虑一种场景：A物理交换机有VLAN1(Port1和Port2），VLAN2(Port3和Port4），Port5
+                       B物理交换机有VLAN1(Port1和Port2），VLAN2(Port3和Port4），Port5
+                       则同一个VLAN id内的主机可以通信，即Port1，Port2，Port3，Port4都叫访问链接
+                       A到B的所有信息都要由A-Port5传递给B-Port5，再由B-Port5分发给B物理交换机的访问链接，则A-Port5和B-Port5就叫汇聚链接
+
+51-2
+虚拟化技术：
+		cpu, memory, i/o
+		IaaS：Infrastructure as a Service,基础架构服务（按照需要创建虚拟机）
+		PaaS：Platform as a Service，平台服务（只提供某一个功能，比如docker）
+		Linux内核：
+			namespace
+				文件系统隔离；
+				网络隔离： 主要用于实现网络资源的隔离，包括网络设备、IPv4以及IPv6地址、IP路由表、防火墙、/proc/net、/sys/class/net以及套接字等；
+				IPC隔离；
+				用户和用户组隔离：
+				PID隔离：对名称空间内的PID重新标号，两个不同的名称空间可以使用相同的PID；
+				UTS隔离：Unix Time-sharing System，提供主机名称和域名的隔离；
+			cgroups 控制组
+				用于完成资源配置；用于限制被各namespace隔离起来的资源，还可以为资源设置权重 、计算使用量、完成各种所需的管理任务等；
+	Linux Network NameSpace：
+		注意：1）netns在内核实现，其控制功能由iproute所提供的netns这个OBJECT来提供；
+                      2）CentOS6.6提供的iproute不具有此OBJECT，需要依赖于OpenStack Icehouse的EPEL源来提供。找的方式就在百度搜索fedora rdo，找到icehouse项目
+                         Centos6上安装netns的步骤如下
+                         vim /etc/yum.repos.d/openstack.repo                     
+                             [openstack]                 iproute是openstack中的一个包
+                             name=openstack for centos6
+                             baseurl=https://repos.fedorapeople.org/repos/openstack/EOL/openstack-icehouse/epel-6/
+                             gpgcheck=0
+                        yum install iproute.x86_64
+                        ip help 查看是否有netns选项出现
+                      3)yum update iproute -y 来实现                  
+		      4)ip netns help 查看netns选项的帮助命令
+			ip netns list
+			ip netns add NAME
+			ip netns del NAME
+			ip netns exec NAME COMMAND
+
+1)创建两个网络名称空间，并且配置ip地址通信的案例操作步骤：
+                ip netns add r1
+                ip netns add r2
+                ip netns list
+                ip link add veth1.1 type veth peer name veth1.2
+                ip link set veth1.1 netns r1
+                ip netns exec r1 ip link set veth1.1 name eth0 
+                ip netns exec r1 ip addr add 10.0.0.1/24 dev eth0
+                ip netns exec r1 ip link set eth0 up 
+                ip link set veth1.2 netns r2
+                ip netns exec r2 ip link set veth1.2 name eth0 
+                ip netns exec r2 ip addr add 10.0.0.2/24 dev eth0 
+                ip netns exec r2 ip link set eth0 up 
+                ip netns exec r1 ping 10.0.0.2 能够ping通说明配置正常
+2)在以上案例的基础上让r1可以访问外网，比如百度
+  核心思想是，r1网络名称空间里面的默认路由指向宿主机上的eth1地址，然后宿主机的内核转发是打开的，做到这一步r1已经可以ping通宿主机上的ip地址，
+              然后再在宿主机上增加iptables规则，即可让r1网络名称空间访问外网
+                ip link add veth2.1 type veth peer name veth2.2
+                ip link set veth2.1 netns r1
+                ip netns exec r1 ip link set veth2.1 name eth1 
+                ip netns exec r1 ip addr add 10.0.0.1/24 dev eth1 
+                ip netns exec r1 ip link set eth1 up
+                # r1网络名称空间里面的默认路由指向宿主机上的eth1地址 
+                ip netns exec r1 ip route add default via 10.0.0.2 dev eth1 
+                ip set veth2.2 eth1 
+                ip addr add 10.0.0.2/24 dev eth1 
+                ip link set eth1 up 
+                # 确保宿主机的内核转发是打开的
+                cat /proc/sys/net/ipv4/ip_forward
+                1
+                # 此时r1已经可以ping通宿主机上的ip地址,假设宿主机ip是172.16.68.142
+                ip netns exec r1 ping 172.16.68.142
+                # 在宿主机上增加iptables规则
+                iptables -t nat -A POSTROUTING  -s 10.0.0.0/24 -p tcp   -j  MASQUERADE
+                # 由于网络名称空间内没有dns解析文件，所以只能访问百度的地址//14.215.177.39
+                ip netns exec r1 curl http://14.215.177.39
+                   <!DOCTYPE html>
+                   <!--STATUS OK-->.........  出现status 为ok，说明访问成功
+
+3)在一个host机内创建一个虚拟机（qemu-kvm实现），虚拟网卡（brctl实现，实际上可以理解为虚拟交换机），虚拟路由器（netns实现），物理网桥。
+                网络架构：虚拟机连接虚拟网卡，虚拟网桥连接虚拟路由器，虚拟路由器连接物理桥，最后虚拟机可以同物理网桥通信
+                1）创建物理网桥br0
+                brctl addbr br0 
+                ip link set br0 up 
+                ip addr del 192.168.139.198 dev eth1 
+                ip addr add 192.168.139.198 dev br0
+                brctl addif br0 eth1
+                2）创建网络名称空间r3，并创建一对网卡，一半在物理网桥br0上，一半在网络名称空间r3内
+                ip netns add r3   创建网络名称空间前，务必要先确保host机上的网卡转发是打开的，因为网络名称空间的网卡间转发无法进行设置
+                ip link add veth1.1 type veth peer name veth1.2  类型为veth的就表示一对网卡，peer name 表示另外一半网卡名称
+                ip link set veth1.1 up 
+                brctl addif br0 veth1.1 
+                ip link set veth1.2 netns r3
+                ip netns exec r3 ip link set veth1.2 name  eth0 
+                ip netns exec r3 ip link set eth0 up
+                ip netns exec r3 ip addr add 192.168.139.1/24 eth0
+                ip route add 10.0.0.0/24  via 192.168.139.1 dev eth0   给物理网桥一个网关
+
+                3）创建虚拟网桥br1，创建一对虚拟网卡，一半在虚拟网桥br1内，一半在网络名称空间r3内
+                brctl addbr br1
+                ip link set br1 up 
+                ip link add veth2.1 type veth peer name veth2.2   
+                ip link set veth2.1 up 
+                brctl addif br1 veth2.1
+                ip link set veth2.2 netns r3
+                ip netns exec r3 ip link set veth2.2 name eth1   到底要加name还是不加name 
+                ip netns exec r3 ip link set eth1 up  
+                ip netns exec r3 ip addr add 10.0.0.3/24  dev eth1
+                ip netns exec r3 dnsmasq  --dhcp-range=10.0.0.30,10.0.0.60  --dhcp-option=1,255.255.255.0 --dhcp-option=3,10.0.0.3   1表示netmask，3表示default route 
+
+                4）创建一个虚拟机，虚拟机的一半网卡在虚拟网桥br1内
+                qemu-kvm  -name test1 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test1.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:01  -net tap,ifname=veth1,script=/etc/qemu-ifup-br1,downscript=/etc/qemu-ifdown-br1
+                          -vnc :1  -daemonize   此处要提供对应的qemu-ifup-br1脚本
+                vncviewer :1 &
+                udhcp -R   手动获取IP地址，udhcp应该是由dnsmasq程序提供
+                ifconfig   查看是否已经自动获得IP地址
+                route -n   由于在dnsmasq中已经指定默认路由为10.0.0.3，即相当于执行ip route add default via 10.0.0.3 dev ethn,所以应该可以直接ping通
+                ping 192.168.139.198 
+如果可以ping通说明配置成功，如果配置失败，先检查所有设备是否up起来，并且可使用tcpdump工具逐个节点检查
+
+补充说明：
+      netns可以当做路由器使用 
+      dnsmasq --help dhcp 查看--dhcp-option中的每个数字对应的意思
+      修改网卡名称的操作
+          vim /etc/udev/rule.d/70-persinstant.net.rules
+          vim /etc/sysconfig/network-scripts/ifcfg-ethx
+          modprobe -r e1000 
+          modprobe e1000
+
+          
+51-3
+网络虚拟化：
+
+	复杂的虚拟化网络实现必须要用到路由器和交换机：
+		netns--------用来虚拟路由器
+		OpenVSwitch--用来虚拟交换机，OpenVSwitch虚拟出来的交换机支持VLAN
+	OVS是基于C语言研发，其特性有：
+		802.1q, trunk, access
+		NIC bonding
+		NetFlow（网络流）, sFlow
+		QoS配置及策略
+		GRE（通用路由封装）, VxLAN 
+		OpenFlow
+	OVS的组成部分：
+		ovs-vswitchd: OVS daemon, 实现数据报文交换功能，和Linux内核兼容模块一同实现了基于流的交换技术；---核心功能
+		ovsdb-server：轻量级的数据库服务，主要保存了整个OVS的配置信息，例如接口、交换和VLAN等等；ovs-vswithed的交换功能基于此库实现；--重要
+		ovs-vsctl：用于获取或更改ovs-vswitchd的配置信息，其修改操作会保存至ovsdb-server中；--重要
+                ovs-dpctl
+		ovs-appctl
+		ovsdbmonitor
+		ovs-controller
+		ovs-ofctl
+		ovs-pki
+        openvswitch的安装步骤：
+                vim /etc/yum.repos.d/openstack.repo                     
+                             [openstack]                           openvswitch是openstack中的一个包
+                             name=openstack for centos6
+                             baseurl=https://repos.fedorapeople.org/repos/openstack/EOL/openstack-icehouse/epel-6/
+                             gpgcheck=0
+                yum install openvswitch -y 
+                service openvswitch start   (第一次启动会创建一个文件）
+	ovs-vsctl命令的使用：
+		show: 查看ovsdb配置的详细内容
+		add-br NAME：添加桥设备；
+		list-br: 显示所有已定义BRIDGE
+		del-br BRIDGE: 删除桥
+		add-port BRIDGE PORT: 将PORT添加至指定的BRIDGE，PORT就是网卡
+		list-ports BRIDGE: 显示指定BRIDGE上已经添加的所有PORT
+		del-port [BRIDGE] PORT: 从指定BRIDGE移除指定的PORT
+                list TBL (TBL可以是interface或者port，这两张表很重要，实际已经是数据库操作命令）
+                remove  port  PORTNAME  tag=# 移除tag的方法
+
+1)在一个host机上利用ovs-vsctl创建出网桥br1，再创建两个虚拟机test1和test2实现通信（和前面brct创建桥的配置步骤一样，只是这里是ovs-vsctl创建网桥）
+         准备工作：安装配置好openvswitch，并启动openvswitch服务
+         ovs-vsctl add-br br1   ovs-vsctl创建的桥是自动up的
+         ovs-vsctl list-br br1 
+         vim /etc/qemu-ifup-br1
+		#!/bin/bash
+		#
+		bridge=br1
+		if [ -n "$1" ]; then
+		    ip link set $1 up
+		    sleep 1
+		    ovs-vsctl add-port $bridge $1
+		    [ $? -eq 0 ] && exit 0 || exit 1
+		else
+		    echo "Error: no port specified."
+		    exit 2
+		fi
+         bash -n /etc/qemu-ifup-br1
+         chmod +x /etc/qemu-ifup-br1
+
+         vim /etc/qemu-ifdown-br1
+		#!/bin/bash
+		#
+		bridge=br1
+
+		if [ -n "$1" ]; then
+		    ip link set $1 down
+		    sleep 1
+		    ovs-vsctl del-port $bridge $1
+		    [ $? -eq 0 ] && exit 0 || exit 1
+		else
+		    echo "Error: no port specified."
+		    exit 2
+		fi
+         bash -n /etc/qemu-ifdown-br1
+         chmod +x /etc/qemu-ifdown-br1
+	 qemu-kvm  -name test1 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test1.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:01  -net tap,ifname=veth1,script=/etc/qemu-ifup-br1,downscript=/etc/qemu-ifdown-br1
+                          -vnc :1  -daemonize 
+         qemu-kvm  -name test2 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test2.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:02  -net tap,ifname=veth2,script=/etc/qemu-ifup-br1,downscript=/etc/qemu-ifdown-br1
+                          -vnc :2  -daemonize
+          vncviewer :1 &
+          ip addr add 10.0.0.1/24 dev eth0 
+          vncviewer :2 &
+          ip addr add 10.0.0.2/24 dev eth0
+          ping 10.0.0.1 如果ping通则配置正常
+
+2）利用ovs-vsctl增加VLAN号，必须确保要在同一个VLAN id才能通信
+          准备工作：先确保1）是配置合格的
+          ovs-vsctl  set  port  veth1  tag=10  设置VLAN号码的方法实际就是修改veth1这张表中tag字段的值
+          ovs-vsctl  list port  veth1 
+_uuid               : ab4b0272-95ea-432c-8ab1-d374af3903ff
+bond_downdelay      : 0
+bond_fake_iface     : false
+bond_mode           : []
+bond_updelay        : 0
+external_ids        : {}
+fake_bridge         : false
+interfaces          : [2a3b0a43-01d8-487c-abbe-d13c953c9baa]
+lacp                : []
+mac                 : []
+name                : "veth1"
+other_config        : {}
+qos                 : []
+statistics          : {}
+status              : {}
+tag                 : 10 --确保此处被修改10
+trunks              : []
+vlan_mode           : []
+
+         连入test1虚拟机（IP地址为10.0.0.1）去ping 10.0.0.2是无法ping通的
+         ovs-vsctl  set  port  veth2  tag=10  
+         ovs-vsctl  list port  veth2 
+         再次连入test1虚拟机（IP地址为10.0.0.1）去ping 10.0.0.2是可以ping通的，说明配置正常
+
+3）再在该host机上创建br2交换机，再创建虚拟机test3，且test3的网卡关联到br2交换机。实现test3与test1，test2的通信
+          准备工作：先确保2）是配置合格的
+          ovs-vsctl add-br br2
+          ovs-vsctl list-br br1 
+          vim /etc/qemu-ifup-br2
+		#!/bin/bash
+		#
+		bridge=br2
+		if [ -n "$1" ]; then
+		    ip link set $1 up
+		    sleep 1
+		    ovs-vsctl add-port $bridge $1
+		    [ $? -eq 0 ] && exit 0 || exit 1
+		else
+		    echo "Error: no port specified."
+		    exit 2
+		fi
+         bash -n /etc/qemu-ifup-br2
+         chmod +x /etc/qemu-ifup-br2
+
+         vim /etc/qemu-ifdown-br2
+		#!/bin/bash
+		#
+		bridge=br2
+
+		if [ -n "$1" ]; then
+		    ip link set $1 down
+		    sleep 1
+		    ovs-vsctl del-port $bridge $1
+		    [ $? -eq 0 ] && exit 0 || exit 1
+		else
+		    echo "Error: no port specified."
+		    exit 2
+		fi
+         bash -n /etc/qemu-ifdown-br2
+         chmod +x /etc/qemu-ifdown-br2
+         qemu-kvm  -name test3 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test3.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:03  -net tap,ifname=veth3,script=/etc/qemu-ifup-br2,downscript=/etc/qemu-ifdown-br2
+                          -vnc :3  -daemonize
+         ovs-vsctl  set  port  veth3  tag=10  
+         ovs-vsctl  list port  veth3 
+         ip link add veth3.1 type veth peer name veth3.2 
+         ip link set veth3.1 up 
+         ip link set veth3.2 up 
+         ovs-vsctl add-port br1 veth3.1
+         ovs-vsctl add-port br2 veth3.2
+         vncviewer :3 &
+         ip addr add 10.0.0.3/24 dev eth0 
+         ping 10.0.0.1 如果ping通则配置正常
+
+
+注意：
+    ovs-vsctl创建出来的桥无法使用brctl来查看
+    PORT就是网卡，iface就是接口，一个网卡可以陪着多个接口
+
+
+
+51-4
+核心总结：---重要
+    如果只有VLAN，则只能实现在单台物理机上创建多台虚拟机，相同VLAN id的能通信，不同VLAN id的不能通信。
+    但是无法实现不同物理机上的虚拟机通信问题，GRE实现了在不同物理机上的不同虚拟机通信问题
+
+	GRE: Generic Routing Encapsulation，通用路由封装，其特性有：
+             是一种隧道技术
+             可以用一种报文来承载另外一种报文，GRE工作在ip层
+             是一种点到点的协议
+
+4）在两个host机（192.168.139.198和192.168.139.192）上启动虚拟机，使用GRE实现虚拟机的通信，此时还可以实现B节点物理节点上的虚拟机可以从A节点的网络名称空间里获取ip地址
+        host机192.168.139.198上开启虚拟机test1：
+        ovs-vsctl add br1
+        qemu-kvm  -name test1 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test1.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:01  -net tap,ifname=veth1,script=/etc/qemu-ifup-br1,downscript=/etc/qemu-ifdown-br1
+                          -vnc :1  -daemonize
+        vncviewer :1 &
+        ip addr add 10.0.0.1/24 dev eth0
+        host机192.168.139.192的上开启虚拟机test2：
+        ovs-vsctl add br1 
+        qemu-kvm  -name test3 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test3.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:03  -net tap,ifname=veth3,script=/etc/qemu-ifup-br1,downscript=/etc/qemu-ifdown-br1
+                          -vnc :3  -daemonize
+        vncviewer :3 &
+        ip addr add 10.0.0.3/24 dev eth0
+        ping 10.0.0.1               此时不能ping通
+
+        host机192.168.139.198上做如下配置：
+        ovs-vsctl add-port br1 gre0                                                可以直接添加port，即使port不存在也可以直接添加
+        ovs-vsctl set interface gre0 type=gre  options:remote_ip=192.168.139.192   默认type是eth类型，需要修改为gre
+        host机192.168.139.192上做如下配置：
+        ovs-vsctl add-port br1 gre0                                              
+        ovs-vsctl set interface gre0 type=gre  options:remote_ip=192.168.139.198
+        ovs-vsctl list interface gre0 
+_uuid               : 4f117b88-46d4-4548-8be9-8c13086e5e5d
+admin_state         : up
+bfd                 : {}
+bfd_status          : {}
+cfm_fault           : []
+cfm_fault_status    : []
+cfm_flap_count      : []
+cfm_health          : []
+cfm_mpid            : []
+cfm_remote_mpids    : []
+cfm_remote_opstate  : []
+duplex              : []
+external_ids        : {}
+ifindex             : 0
+ingress_policing_burst: 0
+ingress_policing_rate: 0
+lacp_current        : []
+link_resets         : 0
+link_speed          : []
+link_state          : up
+mac                 : []
+mac_in_use          : "42:29:4f:ee:d1:f2"
+mtu                 : []
+name                : "gre0"
+ofport              : 2
+ofport_request      : []
+options             : {remote_ip="192.168.139.198"}--对端ip地址
+other_config        : {}
+statistics          : {collisions=0, rx_bytes=18746, rx_crc_err=0, rx_dropped=0, rx_errors=0, rx_frame_err=0, rx_over_err=0, rx_packets=201, tx_bytes=18746, tx_dropped=0, tx_errors=0, tx_packets=201}
+status              : {tunnel_egress_iface="eth1", tunnel_egress_iface_carrier=up}
+type                : gre ---类型
+
+        vncviewer :3 &
+        ping 10.0.0.1               此时可以ping通说明配置正常 
+
+补充配置：在host机192.168.139.198上创建网络名称空间r1，在创建一对网卡（一半在r1，一半在br1），在r1开启dnsmasq服务，
+          此时host机192.168.139.192上的test3虚拟机可以自动获取ip地址
+          ip netns add r1
+          ip link add veth1.1 type veth peer name veth1.2 
+          ip link set veth1.1 up 
+          ovs-vsctl add-port br1 veth1.1
+          ip link set veth1.2 netns r1
+          ip netns exec r1 ip link set veth1.2 up 
+          ip netns exec r1 ip addr add 10.0.0.10/24 dev veth1.2 
+          ip netns exec r1 dnsmasq -F 10.0.0.20,10.0.0.30 -i veth1.2 --dhcp-option=1,255.255.255.0  可以指定dnsmasq启动在网卡veth1.2上
+          在host机192.168.139.192上连入test3，执行udhcpc -R，验证是否可以自动获取ip地址，如果可以则配置成功
+        
+5）实现GRE+VLAN，即host机192.168.139.198上启动两个虚拟机(test1和test2），host机192.168.139.192启动两个虚拟机（test3和test4），
+   test1和test3在一个VLAN id，test2和test4在一个VLAN id
+          准备工作：务必确保4）是配置成功的
+          host机192.168.139.198做如下配置：
+          qemu-kvm  -name test2 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test2.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:02  -net tap,ifname=veth2,script=/etc/qemu-ifup-br1,downscript=/etc/qemu-ifdown-br1
+                          -vnc :2  -daemonize
+          ovs-vsctl set port veth1  tag=10
+          ovs-vsctl set port veth2  tag=11
+          vncviewer :2 &
+          ip addr add 10.0.0.2/24 dev eth0    
+          
+          host机192.168.139.192做如下配置：
+          qemu-kvm  -name test4 -m 64 -smp 1 -drive file=/root/cirros-no_cloud-test4.qcow2,media=disk,if=virtio,format=qcow2 
+                          -net nic,model=virtio,macaddr=52:54:00:00:00:04  -net tap,ifname=veth4,script=/etc/qemu-ifup-br4,downscript=/etc/qemu-ifdown-br4
+                          -vnc :4  -daemonize
+          ovs-vsctl set port veth3  tag=10
+          ovs-vsctl set port veth4  tag=11
+          vncviewer :4 &
+          ip addr add 10.0.0.4/24 dev eth0 
+          ping 10.0.0.2 (在虚拟机test4上执行，如果可以ping通则配置成功）
+          ping 10.0.0.1 如果没有ping通则配置成功
+          vncviewer :3 &   
+          ping 10.0.0.1 (在虚拟机test3上执行，如果可以ping通则配置成功）
+          ping 10.0.0.2  如果没有ping通则配置成功
+
+
+6)在两个host机（192.168.139.198和192.168.139.192）上启动虚拟机，利用VXLAN实现虚拟机的通信。
+  配置步骤与4）完全一样，只是把如下两条命令修改为VXLAN即可
+  ovs-vsctl add-port br1 vx0                                             
+  ovs-vsctl set interface vx0 type=vxlan  options:remote_ip=192.168.139.192 
+
+
+7）利用GRE(或者VXLAN）技术实现虚拟机（以test1为例）访问互联网
+   在host机192.168.139.188上做如下配置
+   ovs-vsctl add-br br1
+   ip addr del 192.168.139.188/24 dev eth1 
+   ip addr add 192.168.139.188/24 dev br1
+   ovs-vsctl add-port br1 eth1 --即创建物理桥
+   ip route add default via 192.168.139.2 dev br1 这是vmware软件自带的默认网关，否则不能正常访问互联网
+   ip netns add r1  --要确保r1的网卡间转发是打开的
+   ip link add veth1.1 type veth peer name veth1.2 
+   ip link set veth1.1 up
+   ovs-vsctl add-port br1 veth1.1 
+   ip link set veth1.2 netns r1 
+   ip netns exec r1 ip link set veth1.2 up
+   ip netns exec r1 ip addr add 192.168.139.200/24 dev veth1.2 
+   ip netns exec r1 ip route add default via 192.168.139.2 dev veth1.2
+   ip netns exec r1 ping www.baidu.com --务必确保r1要能访问互联网
+   ovs-vsctl add-br br2
+   ovs-vsctl add-port br2 gre0                                            
+   ovs-vsctl set interface br2 type=gre  options:remot_ip=192.168.139.198  对应test1在host机ip地址
+   ip link add veth2.1 type veth peer name veth2.2 
+   ip link set veth2.1 up
+   ovs-vsctl add-port br2 veth2.1 
+   ip link set veth2.2 netns r1 
+   ip netns exec r1 ip link set veth2.2 up
+   ip netns exec r1 ip addr add 10.0.0.7/24 dev veth2.2
+   ip netns exec r1 iptables -t nat -A POSTROUTING -s 10.0.0.0/24     -j SNAT --to-source 192.168.139.200  
+   ip netns exec r1 iptables -t nat -A PREROUTING  -s 192.168.139.200 -j DNAT --to-destination 10.0.0.1
+   如果只有SNAT规则，则只能是内部主机访问外部，外部主机无法访问内部；加了DNAT规则，则外部主机才能访问内部--重要 
+   在host机192.168.139.198上做如下配置：
+   vncviewer :1 &
+   ip route add  default   via 10.0.0.7  dev eth1  这里一定要写成default，表示到任何网段的ip地址都经过10.0.0.7这个网关--重要
+   ping www.baidu.com，如果可以ping通则配置成功
+
+   
+补充资料：虚拟网络VXLAN简介
+
+VXLAN是VMware、Cisco、Arista等其他厂商共同开发由于构建虚拟网络的覆盖技术。我们将以问答的形式重现在学习过程中遇到的问题和解决方法。 
+
+1. 什么是虚拟网络？
+答：从架构角度考虑，我们可以采用与服务器虚拟化引入Hypervisor的方式一样，引入Nypervisor或者叫“虚拟网络管理平台”实现虚拟网络。
+    虚拟网络必须像虚拟机一样，脱离物理网络设备,能够随时被创建、删除、扩展、收缩，实现高度灵活性。
+
+2. 什么是VXLAN？
+答：VXLAN全称Virtual eXtensible LAN，是一种覆盖网络技术或隧道技术。VXLAN将虚拟机发出的数据包封装在UDP中，并使用物理网络的IP/MAC作为outer-header进行封装，
+    然后在物理IP网上传输，到达目的地后由隧道终结点解封并将数据发送给目标虚拟机。
+
+3. VLAN、虚拟网卡、VPN、虚拟交换机，这些不都是虚拟网络技术嘛，那你这边指的虚拟网络和他们有什么区别？
+答：这些技术仅用于解决某一个问题，但没有一个能够呈现完整的网络给用户。所谓完整的网络，我的理解是能够提供L2/L3，甚至L4/L7服务的网络，它不仅仅是交换机或路由器，
+    它还能提供负载均衡、防火墙、ACL、VPN、NAT、DHCP、DNS、QoS等高层服务。而所有这些服务，必须能够在一个能够被单独创建出来的虚拟网络中实现。
+    所以我们必须要有新的方式来实现完整的虚拟网络
+
+4. VXLAN实现了完整的虚拟网络了吗？
+答：没有，VXLAN更多的注重workload mobility，它打破了传统二层网络的限制，能够让跨IP子网传输同一个虚拟二层网络的MAC帧，使得虚拟机的移动不再受二层限制。
+    因为跨三层的虚拟机移动是必需要更改IP的，而IP的更改，意味着与之绑定的N多策略也需要跟着变，非常不灵活。
+    总的来说，VXLAN提供了二层网络框架，为实现上层网络服务虚拟化提供了基础。
+
+5. VXLAN是实现网络虚拟化的唯一方式吗？
+答：不是。VXLAN是一种网络覆盖技术实现二层虚拟化，如果需要三层以上服务，依旧需要额外的手段。另外，以SDN虚拟化控制器来分片网络的方式也能实现网络虚拟化。
+    VXLAN也不是唯一的覆盖技术，微软NVGRE，Nicira STT都是同类实现。
+
+6. 虚拟机如何连接到虚拟网络？
+答：取决于具体实现。VMware ESXi虚拟机通过为虚拟机指定network label连接到VXLAN segment。而Network label就是virtual distributed switch上的port group。
+
+7. VXLAN虚拟网络之间如何隔离？
+答：通过VXLAN header中的VNI字段，这就相当于VLAN ID。不同的是，VNI是一个24bits的字段，可以实现1.6千万个虚拟网络，而VLAN只有4096个，在多租户的云计算环境中，
+    4096个ID显然是不够的。
+
+8. VXLAN封装是由谁来做的？
+答：在VMWARE vCNS环境中，VXLAN的封装和解封装是由运行在ESXi上的一个内核模块，virtual tunnel endpoint（VTEP）来实现的。VTEP维护一张映射表，
+    能够知道目标虚拟机所在的目标ESXi的位置。VMware VTEP会自动创建vmkernel port并为其分配IP地址与物理网络通信
+
+9. VXLAN如何处理广播、多播和未知目的地单播？
+答：VXLAN使用IP多播技术处理广播、多播和未知目的单播。每个VXLAN与一个多播地址绑定，从而确保来自虚拟网络的广播不会泛洪到物理交换机的所有端口。
+
+10. VTEP只能运行在ESXi中吗？
+
+答：不是。VTEP根据具体实现可以运行在单独的设备中，以软件或硬件的方式实现。
+
+11. 如何虚拟化实现三层以上的服务？
+
+答：VMware vCNS将L3以上的服务以edge appliance的方式实现，支持NAT，静态路由、VPN、负载均衡、防火墙、DNS、DHCP。
+
+12. VXLAN之间如何通信？
+
+答：必须通过edge appliance路由，就向VLAN间通信需要走一路由一样。
+
